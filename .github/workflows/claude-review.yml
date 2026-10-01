@@ -20,10 +20,13 @@ on:
       - ready_for_review
       - labeled
 
-# Read-only access to the repo; write to pull-requests so review comments can be posted.
+# Read-only access to the repo; write to pull-requests so review comments can be
+# posted; write to id-token so the job can mint the GitHub OIDC token the action
+# exchanges for Claude credentials (no Anthropic API key stored in secrets).
 permissions:
   contents: read
   pull-requests: write
+  id-token: write
 
 jobs:
   claude-code-review:
@@ -56,11 +59,13 @@ jobs:
       # Check out the base branch only - never the untrusted PR head.
       # nosemgrep: yaml.github-actions.security.pull-request-target-code-checkout.pull-request-target-code-checkout
       - name: Checkout trusted base branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           # Don't leave credentials on disk for later steps.
           persist-credentials: false
+          # We're not executing this untrusted checkout
+          allow-unsafe-pr-checkout: true
 
       # Remove the trigger label so a reviewer can re-apply it to request
       # another review. Removing a label emits an 'unlabeled' event, which
@@ -104,15 +109,43 @@ jobs:
             --name-only \
             > review-input/files.txt
 
+      # DEBUG: remove once OIDC auth is working. Mints a second OIDC token with
+      # the same audience the action uses and prints its claims, so they can be
+      # compared against the federation rule's conditions. Only the decoded
+      # payload is printed; the token itself is masked.
+      - name: Debug - dump OIDC claims
+        env:
+          AUDIENCE: https://api.anthropic.com
+        run: |
+          token=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+            | jq -r '.value')
+          echo "::add-mask::$token"
+
+          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          printf '%s' "$payload" | base64 -d | jq .
+
       # Review the collected files. The prompt and the restricted tool list
       # below keep Claude read-only - it inspects the data and posts comments,
       # but does not apply the diff or execute any repository code.
       - name: Claude code review
-        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
+        id: claude
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
-          anthropic_federation_rule_id: fdrl_01BKpJHU7Zbk3Aeu1uSS9zLH
+          # DEBUG: remove once OIDC auth is working - echoes untrusted PR
+          # content into the job log.
+          show_full_output: true
+          anthropic_federation_rule_id: fdrl_01NjNUAm6hgd28kiXMTHpoja
           anthropic_organization_id: bc6e8deb-65ec-4bee-8ca0-b8ff93b3295f
           anthropic_service_account_id: svac_01FtDyBMqDtyf1zQgMYg98n2
+          # Required because the federation rule is enabled for all workspaces
+          # rather than a single one; without it the token exchange 401s.
+          anthropic_workspace_id: wrkspc_01B9xUyyQJZ3v8ZnvEboCB2B
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # By default the action refuses to run for actors without write
           # access, which would skip every external-contributor PR - exactly the
@@ -200,3 +233,23 @@ jobs:
 
           # Restrict tools to commenting and read-only inspection - no code execution.
           claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Read,Grep,Glob"'
+
+      # DEBUG: remove once OIDC auth is working. The action reports only the
+      # summary fields of the SDK result and swallows the error text, which is
+      # what actually says why the run failed.
+      - name: Debug - dump Claude result
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          file="${EXECUTION_FILE:-${RUNNER_TEMP}/claude-execution-output.json}"
+          if [ ! -f "$file" ]; then
+            echo "no execution file at $file"
+            exit 0
+          fi
+
+          echo "--- result messages ---"
+          jq -s '[.. | objects | select(.type? == "result")]' "$file"
+
+          echo "--- error-bearing messages ---"
+          jq -s '[.. | objects | select(has("error") or has("is_error"))]' "$file"
