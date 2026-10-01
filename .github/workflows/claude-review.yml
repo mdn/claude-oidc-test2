@@ -64,6 +64,8 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           # Don't leave credentials on disk for later steps.
           persist-credentials: false
+          # We're not executing this untrusted checkout
+          allow-unsafe-pr-checkout: true
 
       # Remove the trigger label so a reviewer can re-apply it to request
       # another review. Removing a label emits an 'unlabeled' event, which
