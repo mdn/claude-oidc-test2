@@ -135,7 +135,7 @@ jobs:
       # but does not apply the diff or execute any repository code.
       - name: Claude code review
         id: claude
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
         with:
           # DEBUG: remove once OIDC auth is working - echoes untrusted PR
           # content into the job log.
